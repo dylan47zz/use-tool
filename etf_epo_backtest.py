@@ -1377,123 +1377,52 @@ def _adjust_weights_for_trading(target_weights, current_data, total_value):
     if not target_weights:
         return {}
 
-    # 添加诊断日志
-    log.info("\n" + "=" * 70)
-    log.info("【诊断日志：_adjust_weights_for_trading 开始】")
-    log.info(
-        f"输入 target_weights: {dict((k, f'{v * 100:.2f}%') for k, v in target_weights.items())}"
-    )
-    log.info(f"总资产: ¥{total_value:,.2f}")
-    log.info(f"最小交易手数: {g.min_lot} 股")
-
     assets = []
     weights = []
-    filtered_etfs = []
 
     for etf, weight in target_weights.items():
         price = current_data[etf].last_price
         if price is None or np.isnan(price) or price <= 0:
-            log.info(f"  过滤 {etf}: 价格无效 ({price})")
             continue
         target_value = total_value * weight
         shares = int(target_value / price // g.min_lot) * g.min_lot
         min_value = g.min_lot * price
-        log.info(
-            f"  {etf}: 权重={weight * 100:.2f}%, 价格={price:.4f}, 目标金额={target_value:.2f}, 最小交易={min_value:.2f}, 股数={shares}"
-        )
         if shares < g.min_lot:
-            log.info(
-                f"  → 过滤 {etf}: 目标金额 {target_value:.2f} < 最小交易 {min_value:.2f}"
-            )
-            filtered_etfs.append((etf, weight, target_value, min_value))
             continue
         assets.append(etf)
         weights.append(weight)
 
-    log.info(f"过滤掉的ETF: {[e[0] for e in filtered_etfs]}")
-    log.info(f"保留的ETF: {assets}")
-
     if not assets:
-        log.info("所有ETF都被过滤，返回空字典")
         return {}
 
     weights = _normalize(np.array(weights))
-    log.info(
-        f"归一化后权重: {dict((k, f'{v * 100:.2f}%') for k, v in zip(assets, weights))}"
-    )
 
     # 应用 A股 权重限制
     a_share_cap = g.a_share_weight_cap
     if g.use_dynamic_a_share_cap and g.factor_df is not None:
         a_share_cap = _dynamic_a_share_cap(assets, g.factor_df)
     if a_share_cap is not None:
-        a_assets = [a for a in assets if a in g.a_share_etfs]
-        if a_assets:
-            a_weight = sum(
-                weights[i] for i, a in enumerate(assets) if a in g.a_share_etfs
-            )
-            log.info(
-                f"\n【A股限制】A股ETF: {a_assets}, 当前权重: {a_weight * 100:.2f}%, 上限: {a_share_cap * 100:.2f}%"
-            )
-            weights_before = dict(
-                (k, f"{v * 100:.2f}%") for k, v in zip(assets, weights)
-            )
         weights = _apply_group_weight_cap(
             weights, list(assets), g.a_share_etfs, a_share_cap
         )
-        if a_assets:
-            a_weight_after = sum(
-                weights[i] for i, a in enumerate(assets) if a in g.a_share_etfs
-            )
-            log.info(f"  A股限制后权重: {a_weight_after * 100:.2f}%")
-            weights_after = dict(
-                (k, f"{v * 100:.2f}%") for k, v in zip(assets, weights)
-            )
 
     # 应用行业 权重限制
     industry_cap = g.industry_weight_cap
     if g.use_dynamic_industry_cap and g.factor_df is not None:
         industry_cap = _dynamic_industry_cap(assets, g.factor_df)
     if industry_cap is not None:
-        i_assets = [a for a in assets if a in g.industry_etfs]
-        if i_assets:
-            i_weight = sum(
-                weights[i] for i, a in enumerate(assets) if a in g.industry_etfs
-            )
-            log.info(
-                f"\n【行业限制】行业ETF: {i_assets}, 当前权重: {i_weight * 100:.2f}%, 上限: {industry_cap * 100:.2f}%"
-            )
         weights = _apply_group_weight_cap(
             weights, list(assets), g.industry_etfs, industry_cap
         )
-        if i_assets:
-            i_weight_after = sum(
-                weights[i] for i, a in enumerate(assets) if a in g.industry_etfs
-            )
-            log.info(f"  行业限制后权重: {i_weight_after * 100:.2f}%")
 
     # 应用个股权重上限
     max_weight = g.max_weight
     if g.use_dynamic_max_weight and g.factor_df is not None:
         max_weight = _dynamic_max_weight(list(assets), g.factor_df)
     if max_weight:
-        log.info(f"\n【个股权重上限】上限: {max_weight * 100:.2f}%")
-        weights_before = dict((k, f"{v * 100:.2f}%") for k, v in zip(assets, weights))
-        max_before = max(weights)
-        log.info(f"  上限前最大权重: {max_before * 100:.2f}%")
         weights = _apply_weight_cap(weights, max_weight)
-        max_after = max(weights)
-        log.info(f"  上限后最大权重: {max_after * 100:.2f}%")
-        weights_after = dict((k, f"{v * 100:.2f}%") for k, v in zip(assets, weights))
-        log.info(f"  上限前权重: {weights_before}")
-        log.info(f"  上限后权重: {weights_after}")
 
     result = dict(zip(assets, weights))
-    log.info(f"\n【诊断日志：_adjust_weights_for_trading 结束】")
-    log.info(
-        f"最终 target_weights: {dict((k, f'{v * 100:.2f}%') for k, v in result.items())}"
-    )
-    log.info("=" * 70 + "\n")
 
     return result
 
