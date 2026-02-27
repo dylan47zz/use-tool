@@ -1047,8 +1047,14 @@ def calculate_for_date(calc_date_str, verbose=True):
                 remaining_weights = np.delete(weights, filtered_idx)
                 remaining_assets = [a for a in assets if a != "561360.XSHG"]
                 remaining_weights = _normalize(remaining_weights)
-                print(f"      创业板: {remaining_weights[0] * 100:.2f}%")
-                print(f"      黄金: {remaining_weights[1] * 100:.2f}%")
+                # 诊断日志：安全处理任意数量的ETF
+                if len(remaining_weights) >= 2:
+                    print(f"      创业板: {remaining_weights[0] * 100:.2f}%")
+                    print(f"      黄金: {remaining_weights[1] * 100:.2f}%")
+                elif len(remaining_weights) == 1:
+                    print(f"      {remaining_assets[0]}: {remaining_weights[0] * 100:.2f}% (仅1个ETF)")
+                else:
+                    print(f"      (无剩余ETF)")
 
         # 应用 A股权重限制
         a_share_cap = PARAMS["a_share_weight_cap"]

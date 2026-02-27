@@ -5,8 +5,8 @@
 # v2版本：使用Ledoit-Wolf统计最优收缩估计替代经验收缩
 # 升级内容：
 #   1. 将协方差估计从"经验shrinkage"升级为"统计最优shrinkage"
-#   2. ETF池优化：豆粕->石油ETF，新增十年国债
-#   3. 配置逻辑：A股只有创业板（剔除沪深300后表现更好），行业竞争选1只（有色vs石油）
+#   2. ETF池优化：豆粕->石油ETF，新增沪深300和十年国债
+#   3. 配置逻辑：A股竞争选1只（创业板vs沪深300），行业竞争选1只（有色vs石油）
 #   4. 债券保底：国债最低15%仓位，提供防御性配置
 
 # 动量 + 质量因子 -> EPO 权重（Ledoit-Wolf收缩 + GARCH 锚定）
@@ -356,6 +356,7 @@ def _print_rebalance_summary(changes):
 ETF_NAME_MAP = {
     "518880.XSHG": "黄金ETF",
     "159915.XSHE": "创业板ETF",
+    # "510300.XSHG": "沪深300ETF",  # 新增：A股价值
     "513100.XSHG": "纳指ETF",
     "513980.XSHG": "恒指ETF",
     "159980.XSHE": "有色ETF大成",
@@ -366,6 +367,7 @@ ETF_NAME_MAP = {
 ETF_CATEGORY_MAP = {
     "518880.XSHG": "商品",
     "159915.XSHE": "A股成长",
+    # "510300.XSHG": "A股价值",  # 新增：沪深300
     "513100.XSHG": "美股",
     "513980.XSHG": "港股",
     "159980.XSHE": "周期",
@@ -395,10 +397,11 @@ def initialize(context):
     log.set_level("system", "error")
     log.set_level("order", "error")
 
-    # ETF池：7只ETF（剔除沪深300），覆盖商品、A股、美股、港股、周期、债券
+    # ETF池：8只ETF，覆盖商品、A股、美股、港股、周期、债券
     g.etf_pool = [
         "518880.XSHG",  # 黄金（商品）
         "159915.XSHE",  # 创业板（A股成长）
+        # "510300.XSHG",  # 沪深300（A股价值）- 新增
         "513100.XSHG",  # 纳指（美股）
         "513980.XSHG",  # 恒指（港股）
         "159980.XSHE",  # 有色（周期）
@@ -443,7 +446,7 @@ def initialize(context):
     g.trend_hard_filter = False
     g.min_lot = 100
     g.fallback_etf = "518880.XSHG"
-    g.max_a_share_holdings = 1  # A股只有创业板（剔除沪深300后回测表现更好）
+    g.max_a_share_holdings = 1  # A股竞争选1只（创业板 vs 沪深300）
     g.a_share_weight_cap = 0.5  # A股总仓位上限50%
     g.a_share_weight_cap_high = 0.5
     g.a_share_weight_cap_low = 0.35
@@ -462,9 +465,10 @@ def initialize(context):
     g.premium_penalty = 0.5
     g.premium_hard_filter = False
     g.premium_etfs = {"513100.XSHG"}
-    # A股ETF：只有创业板（剔除沪深300后回测表现更好）
+    # A股ETF：创业板（成长）和沪深300（价值）竞争选1只
     g.a_share_etfs = {
         "159915.XSHE",  # 创业板（成长）
+        "510300.XSHG",  # 沪深300（价值）
     }
     # 行业ETF：有色和石油都是周期，竞争选1只
     g.industry_etfs = {
@@ -498,8 +502,8 @@ def initialize(context):
 
     # 每周调仓（周三）
     g.rebalance_weekday = 3
-    g.factor_time = "11:00"
-    g.rebalance_time = "11:15"
+    g.factor_time = "09:20"
+    g.rebalance_time = "09:45"
 
     g.price_cache = {}
     g.factor_df = None
@@ -730,13 +734,11 @@ def rebalance(context):
         log.warn("no returns for EPO")
         return
 
-    # 信号处理
-    raw_signals = g.factor_df.loc[returns_df.columns, "signal"].values
-    signals = raw_signals.copy()
+    signals = g.factor_df.loc[returns_df.columns, "signal"].values
     if g.anchor_weight > 0:
         anchor_signal = _build_anchor_signal(returns_df.columns)
         signals = (1 - g.anchor_weight) * signals + g.anchor_weight * anchor_signal
-
+    signals = np.clip(signals, 0, None)
     if g.signal_power != 1.0:
         signals = np.power(signals, g.signal_power)
 
@@ -781,29 +783,23 @@ def rebalance(context):
         penalties = penalties * dd_penalty
 
     weights = _normalize(np.array(weights) * penalties)
-
     a_share_cap = g.a_share_weight_cap
     if g.use_dynamic_a_share_cap:
         a_share_cap = _dynamic_a_share_cap(returns_df.columns, factor_df)
-
     if a_share_cap is not None:
         weights = _apply_group_weight_cap(
             weights, list(returns_df.columns), g.a_share_etfs, a_share_cap
         )
-
     industry_cap = g.industry_weight_cap
     if g.use_dynamic_industry_cap:
         industry_cap = _dynamic_industry_cap(returns_df.columns, factor_df)
-
     if industry_cap is not None:
         weights = _apply_group_weight_cap(
             weights, list(returns_df.columns), g.industry_etfs, industry_cap
         )
-
     max_weight = g.max_weight
     if g.use_dynamic_max_weight:
         max_weight = _dynamic_max_weight(list(returns_df.columns), factor_df)
-
     if max_weight:
         weights = _apply_weight_cap(weights, max_weight)
     target_weights = dict(zip(returns_df.columns, weights))
@@ -841,17 +837,9 @@ def rebalance(context):
 def _execute_orders(context, target_weights):
     current_data = get_current_data()
     total_value = context.portfolio.total_value
-
     target_weights = _adjust_weights_for_trading(
         target_weights, current_data, total_value
     )
-
-    log.info("\n【诊断日志：_adjust_weights_for_trading 返回】")
-    log.info(
-        f"调整后 target_weights: {dict((k, f'{v * 100:.2f}%') for k, v in target_weights.items())}"
-    )
-    log.info("=" * 70 + "\n")
-
     if not target_weights:
         return
 
@@ -928,8 +916,6 @@ def _epo_weights(returns_df, signals, risk_aversion):
     if returns_df.shape[0] < 2 or n == 0:
         return np.ones(n) / max(n, 1)
 
-    assets = list(returns_df.columns)
-
     # v2: 使用Ledoit-Wolf统计最优收缩估计
     if g.use_ledoit_wolf and _LEDOIT_WOLF_AVAILABLE:
         try:
@@ -940,6 +926,7 @@ def _epo_weights(returns_df, signals, risk_aversion):
             g.last_shrinkage = float(
                 np.clip(lw.shrinkage_, g.shrinkage_floor, g.shrinkage_cap)
             )
+            log.info(f"📊 Ledoit-Wolf统计最优收缩强度: {lw.shrinkage_:.4f}")
         except Exception as e:
             log.warn(f"Ledoit-Wolf估计失败，回退到样本协方差: {e}")
             # 回退到样本协方差
@@ -959,16 +946,12 @@ def _epo_weights(returns_df, signals, risk_aversion):
         inv_cov = np.pinv(shrunk)
 
     raw = inv_cov.dot(signals)
-
     if risk_aversion > 0:
         raw = raw / risk_aversion
 
     # 仅做多约束
     raw = np.maximum(0, raw)
-
-    weights = _normalize(raw)
-
-    return weights
+    return _normalize(raw)
 
 
 def _compute_metrics(close, volume):
@@ -1217,7 +1200,6 @@ def _apply_weight_cap(weights, cap):
         active[over_idx] = False
     if remaining > 1e-8 and active.any():
         capped[active] += remaining / active.sum()
-
     return capped
 
 
@@ -1376,55 +1358,37 @@ def _select_candidates(signal_series, factor_df):
 def _adjust_weights_for_trading(target_weights, current_data, total_value):
     if not target_weights:
         return {}
-
     assets = []
     weights = []
-
     for etf, weight in target_weights.items():
         price = current_data[etf].last_price
         if price is None or np.isnan(price) or price <= 0:
             continue
-        target_value = total_value * weight
-        shares = int(target_value / price // g.min_lot) * g.min_lot
-        min_value = g.min_lot * price
-        if shares < g.min_lot:
+        if total_value * weight < g.min_lot * price:
             continue
         assets.append(etf)
         weights.append(weight)
-
     if not assets:
         return {}
-
     weights = _normalize(np.array(weights))
-
-    # 应用 A股 权重限制
     a_share_cap = g.a_share_weight_cap
     if g.use_dynamic_a_share_cap and g.factor_df is not None:
         a_share_cap = _dynamic_a_share_cap(assets, g.factor_df)
     if a_share_cap is not None:
-        weights = _apply_group_weight_cap(
-            weights, list(assets), g.a_share_etfs, a_share_cap
-        )
-
-    # 应用行业 权重限制
+        weights = _apply_group_weight_cap(weights, assets, g.a_share_etfs, a_share_cap)
     industry_cap = g.industry_weight_cap
     if g.use_dynamic_industry_cap and g.factor_df is not None:
         industry_cap = _dynamic_industry_cap(assets, g.factor_df)
     if industry_cap is not None:
         weights = _apply_group_weight_cap(
-            weights, list(assets), g.industry_etfs, industry_cap
+            weights, assets, g.industry_etfs, industry_cap
         )
-
-    # 应用个股权重上限
     max_weight = g.max_weight
     if g.use_dynamic_max_weight and g.factor_df is not None:
         max_weight = _dynamic_max_weight(list(assets), g.factor_df)
     if max_weight:
         weights = _apply_weight_cap(weights, max_weight)
-
-    result = dict(zip(assets, weights))
-
-    return result
+    return dict(zip(assets, weights))
 
 
 def _zscore(series):
