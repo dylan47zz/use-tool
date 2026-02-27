@@ -419,6 +419,11 @@ def initialize(context):
     # 因子混合参数
     g.score_weight_momentum = 0.3
     g.score_weight_quality = 0.7
+    # v2: 信号权重模式（方案2/方案3）
+    # 'fixed': 固定权重（使用上面的momentum/quality参数）
+    # 'trend': 趋势调整（牛市动量高，熊市质量高）
+    # 'strength': 信号强度调整（强信号动量高，弱信号质量高）
+    g.signal_weight_mode = 'fixed'
     g.anchor_weight = 0.1
     g.max_holdings = 6
     g.use_rank_scoring = True
@@ -478,12 +483,14 @@ def initialize(context):
     g.max_bond_weight = 0.40  # 债券最高40%仓位（防止过度保守）
 
     # EPO参数 - v2: 使用Ledoit-Wolf统计最优收缩
-    g.epo_risk_aversion = 8.0
+    # g.epo_risk_aversion = 8.0  # v2: 已废弃，归一化后该参数无效
     # v2: 移除了 g.epo_shrinkage，改为自动计算
     g.use_ledoit_wolf = True  # v2: 新增开关，启用Ledoit-Wolf收缩估计
     # v2: 可选，设置收缩强度的上下限（Ledoit-Wolf自动计算的结果会被限制在此范围内）
-    g.shrinkage_floor = 0.0  # 最小收缩强度（0表示完全信任样本协方差）
-    g.shrinkage_cap = 1.0  # 最大收缩强度（1表示完全使用目标矩阵）
+    g.shrinkage_floor = 0.05  # 最小收缩强度（0表示完全信任样本协方差）
+    g.shrinkage_cap = 0.3  # 最大收缩强度（1表示完全使用目标矩阵）
+    # v2: 目标波动率版本 - 控制仓位而不是永远满仓
+    g.target_volatility = 0.15  # 目标年化波动率（12%），0表示不使用波动率缩放（满仓）
 
     # 成交拥挤度惩罚
     g.volume_ratio_threshold = 1.6
@@ -738,8 +745,24 @@ def rebalance(context):
         log.warn("no returns for EPO")
         return
 
-    # 信号处理
-    raw_signals = g.factor_df.loc[returns_df.columns, "signal"].values
+    # 信号处理 - v2: 支持动态信号权重
+    # 根据模式获取动量/质量权重
+    signal_weight_mode = getattr(g, 'signal_weight_mode', 'fixed')
+    if signal_weight_mode != 'fixed':
+        # 获取原始动量分数和质量分数
+        momentum_scores = g.factor_df.loc[returns_df.columns, "momentum_score"].values
+        quality_scores = g.factor_df.loc[returns_df.columns, "quality_score"].values
+
+        # 获取动态权重
+        momentum_w, quality_w = _get_signal_weights(
+            signal_weight_mode, returns_df, None
+        )
+
+        # 重新计算信号
+        raw_signals = momentum_w * momentum_scores + quality_w * quality_scores
+    else:
+        raw_signals = g.factor_df.loc[returns_df.columns, "signal"].values
+
     signals = raw_signals.copy()
     if g.anchor_weight > 0:
         anchor_signal = _build_anchor_signal(returns_df.columns)
@@ -749,14 +772,14 @@ def rebalance(context):
         signals = np.power(signals, g.signal_power)
 
     # v2: 使用Ledoit-Wolf统计最优收缩估计
-    weights = _epo_weights(
-        returns_df,
-        signals,
-        g.epo_risk_aversion,
-    )
+    weights = _epo_weights(returns_df, signals)
+
+    # ====== 调试日志：EPO权重（未归一化）======
+    log.info(f"【LW调试】EPO原始权重(raw): {dict(zip(list(returns_df.columns), weights))}")
 
     if g.use_risk_parity:
         weights = _apply_risk_parity(weights, returns_df)
+        log.info(f"【LW调试】RiskParity后权重: {dict(zip(list(returns_df.columns), weights))}")
 
     # 成交拥挤度惩罚
     penalties = []
@@ -789,6 +812,7 @@ def rebalance(context):
         penalties = penalties * dd_penalty
 
     weights = _normalize(np.array(weights) * penalties)
+    log.info(f"【LW调试】Penalty归一化后权重: {dict(zip(list(returns_df.columns), weights))}")
 
     a_share_cap = g.a_share_weight_cap
     if g.use_dynamic_a_share_cap:
@@ -814,10 +838,17 @@ def rebalance(context):
 
     if max_weight:
         weights = _apply_weight_cap(weights, max_weight)
+    log.info(f"【LW调试】MaxWeight限制后权重: {dict(zip(list(returns_df.columns), weights))}")
     target_weights = dict(zip(returns_df.columns, weights))
 
     # 债券保底配置：确保债券有最低仓位
     target_weights = _apply_bond_floor(target_weights, factor_df)
+    log.info(f"【LW调试】BondFloor后最终权重: {target_weights}")
+
+    # v2: 目标波动率版本 - 缩放仓位
+    if g.target_volatility > 0:
+        target_weights = _apply_volatility_scaling(target_weights, returns_df, g.target_volatility)
+        log.info(f"【LW调试】波动率缩放后权重: {target_weights}")
 
     _print_header(f"🔄 调仓执行 - {context.current_dt.strftime('%Y-%m-%d')}")
     _print_weight_table(target_weights, factor_df, context.portfolio.total_value)
@@ -914,14 +945,13 @@ def _build_returns_df(etfs):
 
 
 # v2: 使用Ledoit-Wolf统计最优收缩估计
-def _epo_weights(returns_df, signals, risk_aversion):
+def _epo_weights(returns_df, signals):
     """
     计算EPO权重，使用Ledoit-Wolf统计最优收缩估计
 
     Args:
         returns_df: 收益矩阵 (T x n)
         signals: 信号向量 (n,)
-        risk_aversion: 风险厌恶系数
 
     Returns:
         weights: 权重向量 (n,)
@@ -941,10 +971,19 @@ def _epo_weights(returns_df, signals, risk_aversion):
             # Ledoit-Wolf自动计算最优收缩强度
             lw = LedoitWolf(assume_centered=True)  # 收益序列均值≈0
             lw.fit(returns_df.values)
-            shrunk = lw.covariance_
-            g.last_shrinkage = float(
-                np.clip(lw.shrinkage_, g.shrinkage_floor, g.shrinkage_cap)
+
+            # v2修复：获取LW计算的收缩系数，并应用范围限制
+            raw_shrinkage = lw.shrinkage_
+            limited_shrinkage = float(
+                np.clip(raw_shrinkage, g.shrinkage_floor, g.shrinkage_cap)
             )
+            g.last_shrinkage = limited_shrinkage
+
+            # 手动应用收缩：shrunk = (1-s)*样本协方差 + s*目标矩阵（单位矩阵）
+            # 这样才能让shrinkage_floor和shrinkage_cap真正生效
+            target = np.eye(n)  # 目标矩阵
+            shrunk = (1 - limited_shrinkage) * sample_cov + limited_shrinkage * target
+
         except Exception as e:
             log.warn(f"Ledoit-Wolf估计失败，回退到样本协方差: {e}")
             # 回退到样本协方差
@@ -984,16 +1023,11 @@ def _epo_weights(returns_df, signals, risk_aversion):
 
     raw = inv_cov.dot(signals)
 
-    if risk_aversion > 0:
-        raw = raw / risk_aversion
-
     # 仅做多约束
     raw = np.maximum(0, raw)
 
     # ====== 调试日志：对比raw权重差异 ======
     raw_sample = inv_sample_cov.dot(signals)
-    if risk_aversion > 0:
-        raw_sample = raw_sample / risk_aversion
     raw_sample = np.maximum(0, raw_sample)
 
     raw_diff = raw - raw_sample
@@ -1009,9 +1043,9 @@ def _epo_weights(returns_df, signals, risk_aversion):
     if weight_diff:
         log.info(f"【LW调试】权重差异: {weight_diff}")
 
-    weights = _normalize(raw)
-
-    return weights
+    # v2优化：返回未归一化的raw权重，让调用方统一归一化
+    # 这样Ledoit-Wolf的协方差矩阵优化效果能更直接地体现在最终权重中
+    return raw
 
 
 def _compute_metrics(close, volume):
@@ -1417,8 +1451,16 @@ def _select_candidates(signal_series, factor_df):
 
 
 def _adjust_weights_for_trading(target_weights, current_data, total_value):
+    """
+    调整权重以适应交易约束（最小交易量、权重限制等）
+
+    重要：保留原始仓位比例，支持波动率缩放后的非满仓场景
+    """
     if not target_weights:
         return {}
+
+    # v2: 保存原始仓位比例，用于保留波动率缩放效果
+    original_total = float(sum(list(target_weights.values())))
 
     assets = []
     weights = []
@@ -1464,6 +1506,11 @@ def _adjust_weights_for_trading(target_weights, current_data, total_value):
         max_weight = _dynamic_max_weight(list(assets), g.factor_df)
     if max_weight:
         weights = _apply_weight_cap(weights, max_weight)
+
+    # v2: 恢复原始仓位比例，保留波动率缩放效果
+    weights = np.array(weights, dtype=float) * original_total
+    # 再次归一化确保总和正确
+    weights = _normalize(weights)
 
     result = dict(zip(assets, weights))
 
@@ -1556,6 +1603,196 @@ def _ewma_volatility(returns, lam=0.94):
     for r in returns[1:]:
         var = lam * var + (1 - lam) * (r**2)
     return math.sqrt(max(var, 0.0)) * math.sqrt(252)
+
+
+def _get_market_trend(returns_df):
+    """
+    基于收益率趋势判断市场状态（方案3：分层方法）
+
+    第一层：趋势判断决定基础仓位
+    - 牛市(bull)：满仓
+    - 震荡市(consolidation)：7成仓
+    - 熊市(bear)：3成仓
+
+    原理：
+    - 计算近期累计收益率，正向大→牛市，负向大→熊市
+    - 结合趋势强度（类似Sharpe）判断趋势确定性
+
+    Returns:
+        'bull' / 'consolidation' / 'bear'
+    """
+    if returns_df.shape[0] < 20:
+        return 'consolidation'  # 数据不足，默认震荡
+
+    # 计算最近20日累计收益
+    recent_returns = returns_df.iloc[-20:]
+
+    # 等权组合的收益
+    portfolio_returns = recent_returns.mean(axis=1)
+    cum_return = (1 + portfolio_returns).prod() - 1
+
+    # 趋势强度（类似Sharpe）
+    std = portfolio_returns.std()
+    trend_strength = portfolio_returns.mean() / std if std > 0 else 0
+    trend_strength = trend_strength * np.sqrt(252)  # 年化
+
+    # 判断逻辑
+    if cum_return > 0.05 and trend_strength > 0.5:
+        return 'bull'  # 明显上涨趋势
+    elif cum_return < -0.05 and trend_strength < -0.5:
+        return 'bear'  # 明显下跌趋势
+    else:
+        return 'consolidation'  # 震荡市
+
+
+def _get_signal_weights(mode, returns_df=None, signals=None):
+    """
+    根据不同模式计算动量/质量权重
+
+    Args:
+        mode: 信号权重模式
+            'fixed': 使用固定权重(g.score_weight_momentum, g.score_weight_quality)
+            'trend': 根据趋势调整（牛市动量高，熊市质量高）
+            'strength': 根据信号强度调整（强信号动量高，弱信号质量高）
+        returns_df: 收益率矩阵（用于趋势模式）
+        signals: 信号向量（用于信号强度模式）
+
+    Returns:
+        (momentum_weight, quality_weight)
+    """
+    if mode == 'fixed':
+        # 固定权重：使用参数中的值
+        return g.score_weight_momentum, g.score_weight_quality
+
+    elif mode == 'trend':
+        # 方案2：根据趋势调整
+        if returns_df is None:
+            log.warn("【信号权重】trend模式需要returns_df，退回固定权重")
+            return g.score_weight_momentum, g.score_weight_quality
+
+        trend = _get_market_trend(returns_df)
+
+        if trend == 'bull':
+            # 牛市：动量权重高
+            momentum_w, quality_w = 0.7, 0.3
+        elif trend == 'bear':
+            # 熊市：质量权重高
+            momentum_w, quality_w = 0.3, 0.7
+        else:
+            # 震荡市：平衡
+            momentum_w, quality_w = 0.5, 0.5
+
+        log.info(f"【信号权重】趋势={trend}, 动量权重={momentum_w}, 质量权重={quality_w}")
+        return momentum_w, quality_w
+
+    elif mode == 'strength':
+        # 方案3：根据信号强度调整
+        if signals is None:
+            log.warn("【信号权重】strength模式需要signals，退回固定权重")
+            return g.score_weight_momentum, g.score_weight_quality
+
+        avg_signal = np.mean(signals)
+
+        if avg_signal > 0.7:
+            # 信号都很强：动量权重高
+            momentum_w, quality_w = 0.7, 0.3
+        elif avg_signal < 0.4:
+            # 信号都很弱：质量权重高
+            momentum_w, quality_w = 0.3, 0.7
+        else:
+            # 中等信号：平衡
+            momentum_w, quality_w = 0.5, 0.5
+
+        log.info(f"【信号权重】信号强度={avg_signal:.3f}, 动量权重={momentum_w}, 质量权重={quality_w}")
+        return momentum_w, quality_w
+
+    else:
+        log.warn(f"【信号权重】未知模式={mode}，使用固定权重")
+        return g.score_weight_momentum, g.score_weight_quality
+
+
+def _apply_volatility_scaling(target_weights, returns_df, target_volatility):
+    """
+    方案3：分层方法 - 趋势判断 + 波动率微调
+
+    第一层：趋势判断决定基础仓位
+    - 牛市(bull)：满仓 100%
+    - 震荡市(consolidation)：7成仓
+    - 熊市(bear)：3成仓
+
+    第二层：波动率在基础仓位上微调
+    - 波动率高 → 打8折
+    - 波动率低 → 不打折
+
+    Args:
+        target_weights: 目标权重字典 {etf: weight}
+        returns_df: 收益矩阵 (T x n)
+        target_volatility: 目标年化波动率（如0.12表示12%）
+
+    Returns:
+        缩放后的权重字典
+    """
+    if target_volatility <= 0:
+        # 不使用波动率缩放，保持满仓
+        return target_weights
+
+    assets = list(target_weights.keys())
+    if len(assets) == 0:
+        return target_weights
+
+    # 检查returns_df是否包含所有资产
+    missing = set(assets) - set(returns_df.columns)
+    if missing:
+        log.warn(f"【波动率缩放】缺少资产数据: {missing}，跳过缩放")
+        return target_weights
+
+    # ========== 第一层：趋势判断 ==========
+    trend = _get_market_trend(returns_df)
+
+    # 基础仓位配置
+    if trend == 'bull':
+        base_position = 1.0  # 牛市满仓
+    elif trend == 'bear':
+        base_position = 0.3  # 熊市3成仓
+    else:
+        base_position = 0.7  # 震荡市7成仓
+
+    log.info(f"【波动率缩放】市场趋势={trend}, 基础仓位={base_position:.0%}")
+
+    # ========== 第二层：波动率微调 ==========
+    # 构建权重向量
+    w = np.array([target_weights.get(a, 0) for a in assets])
+
+    # 计算组合波动率
+    try:
+        cov = returns_df[assets].cov().values
+        portfolio_var = w @ cov @ w
+        portfolio_vol = math.sqrt(max(portfolio_var, 0)) * math.sqrt(252)
+    except Exception as e:
+        log.warn(f"【波动率缩放】计算波动率失败: {e}，跳过缩放")
+        return target_weights
+
+    if portfolio_vol <= 0:
+        log.warn(f"【波动率缩放】组合波动率为0，跳过缩放")
+        return target_weights
+
+    # 波动率高时微调（打8折）
+    if portfolio_vol > target_volatility * 1.2:
+        vol_adjustment = 0.8
+    else:
+        vol_adjustment = 1.0
+
+    # 最终仓位 = 基础仓位 × 波动率微调
+    final_position = base_position * vol_adjustment
+    final_position = min(final_position, 1.0)  # 最大满仓
+
+    # 打印调试信息
+    log.info(f"【波动率缩放】组合波动率={portfolio_vol:.2%}, 目标={target_volatility:.2%}, 波动微调={vol_adjustment:.0%}, 最终仓位={final_position:.0%}")
+
+    # 应用缩放
+    scaled_weights = {a: w[i] * final_position for i, a in enumerate(assets)}
+
+    return scaled_weights
 
 
 def _apply_bond_floor(target_weights, factor_df):
