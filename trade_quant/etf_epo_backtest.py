@@ -361,6 +361,10 @@ ETF_NAME_MAP = {
     "159980.XSHE": "有色ETF大成",
     "561360.XSHG": "石油ETF",  # 新增：替换豆粕
     "511260.XSHG": "十年国债ETF",  # 新增：债券保底
+    # v2: 新增ETF
+    "561550.XSHG": "中证500ETF",
+    "159259.XSHE": "成长ETF",
+    "159263.XSHE": "价值ETF",
 }
 
 ETF_CATEGORY_MAP = {
@@ -371,6 +375,10 @@ ETF_CATEGORY_MAP = {
     "159980.XSHE": "周期",
     "561360.XSHG": "周期",  # 新增：石油（也是周期）
     "511260.XSHG": "债券",  # 新增：国债
+    # v2: 新增ETF
+    "561550.XSHG": "A股成长",  # 中证500：中盘成长
+    "159259.XSHE": "A股成长",  # 成长ETF
+    "159263.XSHE": "A股价值",  # 价值ETF
 }
 
 
@@ -395,15 +403,19 @@ def initialize(context):
     log.set_level("system", "error")
     log.set_level("order", "error")
 
-    # ETF池：7只ETF（剔除沪深300），覆盖商品、A股、美股、港股、周期、债券
+    # ETF池：10只ETF，覆盖商品、A股、美股、港股、周期、债券
     g.etf_pool = [
         "518880.XSHG",  # 黄金（商品）
         "159915.XSHE",  # 创业板（A股成长）
         "513100.XSHG",  # 纳指（美股）
         "513980.XSHG",  # 恒指（港股）
         "159980.XSHE",  # 有色（周期）
-        "561360.XSHG",  # 石油（周期）- 新增，替换豆粕
-        "511260.XSHG",  # 十年国债（债券）- 新增
+        "561360.XSHG",  # 石油（周期）
+        "511260.XSHG",  # 十年国债（债券）
+        # v2: 新增ETF
+        "561550.XSHG",  # 中证500（中盘）
+        "159259.XSHE",  # 成长ETF
+        "159263.XSHE",  # 价值ETF
     ]
 
     # 窗口参数
@@ -467,9 +479,12 @@ def initialize(context):
     g.premium_penalty = 0.5
     g.premium_hard_filter = False
     g.premium_etfs = {"513100.XSHG"}
-    # A股ETF：只有创业板（剔除沪深300后回测表现更好）
+    # A股ETF：创业板、中证500、成长、价值
     g.a_share_etfs = {
         "159915.XSHE",  # 创业板（成长）
+        "561550.XSHG",  # 中证500（中盘）
+        "159259.XSHE",  # 成长ETF
+        "159263.XSHE",  # 价值ETF
     }
     # 行业ETF：有色和石油都是周期，竞争选1只
     g.industry_etfs = {
