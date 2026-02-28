@@ -109,6 +109,8 @@ PARAMS = {
     # v2: 可选，设置收缩强度的上下限（Ledoit-Wolf自动计算的结果会被限制在此范围内）
     "shrinkage_floor": 0.0,  # 最小收缩强度（0表示完全信任样本协方差）
     "shrinkage_cap": 1.0,  # 最大收缩强度（1表示完全使用目标矩阵）
+    # v2: 目标波动率（0表示不使用，保持满仓）
+    "target_volatility": 0.0,
     "volume_ratio_threshold": 1.6,
     "volume_penalty_power": 0.8,
     "use_relative_crowding": True,
@@ -281,6 +283,130 @@ def _zscore(series):
     if std == 0 or np.isnan(std):
         return pd.Series(0.0, index=series.index)
     return (series - series.mean()) / std
+
+
+def _get_market_trend(returns_df):
+    """
+    基于收益率趋势判断市场状态（方案3：分层方法）
+
+    第一层：趋势判断决定基础仓位
+    - 牛市(bull)：满仓
+    - 震荡市(consolidation)：7成仓
+    - 熊市(bear)：3成仓
+
+    原理：
+    - 计算近期累计收益率，正向大→牛市，负向大→熊市
+    - 结合趋势强度（类似Sharpe）判断趋势确定性
+
+    Returns:
+        'bull' / 'consolidation' / 'bear'
+    """
+    if returns_df.shape[0] < 20:
+        return 'consolidation'  # 数据不足，默认震荡
+
+    # 计算最近20日累计收益
+    recent_returns = returns_df.iloc[-20:]
+
+    # 等权组合的收益
+    portfolio_returns = recent_returns.mean(axis=1)
+    cum_return = (1 + portfolio_returns).prod() - 1
+
+    # 趋势强度（类似Sharpe）
+    std = portfolio_returns.std()
+    trend_strength = portfolio_returns.mean() / std if std > 0 else 0
+    trend_strength = trend_strength * np.sqrt(252)  # 年化
+
+    # 判断逻辑
+    if cum_return > 0.05 and trend_strength > 0.5:
+        return 'bull'  # 明显上涨趋势
+    elif cum_return < -0.05 and trend_strength < -0.5:
+        return 'bear'  # 明显下跌趋势
+    else:
+        return 'consolidation'  # 震荡市
+
+
+def _apply_volatility_scaling(target_weights, returns_df, target_volatility):
+    """
+    方案3：分层方法 - 趋势判断 + 波动率微调
+
+    第一层：趋势判断决定基础仓位
+    - 牛市(bull)：满仓 100%
+    - 震荡市(consolidation)：7成仓
+    - 熊市(bear)：3成仓
+
+    第二层：波动率在基础仓位上微调
+    - 波动率高 → 打8折
+    - 波动率低 → 不打折
+
+    Args:
+        target_weights: 目标权重字典 {etf: weight}
+        returns_df: 收益矩阵 (T x n)
+        target_volatility: 目标年化波动率（如0.12表示12%）
+
+    Returns:
+        缩放后的权重字典
+    """
+    if target_volatility <= 0:
+        # 不使用波动率缩放，保持满仓
+        return target_weights
+
+    assets = list(target_weights.keys())
+    if len(assets) == 0:
+        return target_weights
+
+    # 检查returns_df是否包含所有资产
+    missing = set(assets) - set(returns_df.columns)
+    if missing:
+        print(f"【波动率缩放】缺少资产数据: {missing}，跳过缩放")
+        return target_weights
+
+    # ========== 第一层：趋势判断 ==========
+    trend = _get_market_trend(returns_df)
+
+    # 基础仓位配置
+    if trend == 'bull':
+        base_position = 1.0  # 牛市满仓
+    elif trend == 'bear':
+        base_position = 0.3  # 熊市3成仓
+    else:
+        base_position = 0.7  # 震荡市7成仓
+
+    print(f"【波动率缩放】市场趋势={trend}, 基础仓位={base_position:.0%}")
+
+    # ========== 第二层：波动率微调 ==========
+    # 构建权重向量
+    w = np.array([target_weights.get(a, 0) for a in assets])
+
+    # 计算组合波动率
+    try:
+        cov = returns_df[assets].cov().values
+        portfolio_var = w @ cov @ w
+        portfolio_vol = math.sqrt(max(portfolio_var, 0)) * math.sqrt(252)
+    except Exception as e:
+        print(f"【波动率缩放】计算波动率失败: {e}，跳过缩放")
+        return target_weights
+
+    if portfolio_vol <= 0:
+        print(f"【波动率缩放】组合波动率为0，跳过缩放")
+        return target_weights
+
+    # 波动率高时微调（打8折）
+    if portfolio_vol > target_volatility * 1.2:
+        vol_adjustment = 0.8
+    else:
+        vol_adjustment = 1.0
+
+    # 最终仓位 = 基础仓位 × 波动率微调
+    final_position = base_position * vol_adjustment
+    final_position = min(final_position, 1.0)  # 最大满仓
+
+    # 打印调试信息
+    print(f"【波动率缩放】组合波动率={portfolio_vol:.2%}, 目标={target_volatility:.2%}, 波动微调={vol_adjustment:.0%}, 最终仓位={final_position:.0%}")
+
+    # 应用缩放
+    scaled_weights = {a: w[i] * final_position for i, a in enumerate(assets)}
+
+    return scaled_weights
 
 
 def _build_anchor_signal(etfs, price_cache):
@@ -1290,6 +1416,15 @@ def calculate_for_date(calc_date_str, verbose=True):
             print(f"  A股权重上限: {PARAMS['a_share_weight_cap'] * 100:.0f}%")
             print(f"  行业权重上限: {PARAMS['industry_weight_cap'] * 100:.0f}%")
             print(f"  个股权重上限: {PARAMS['max_weight'] * 100:.0f}%")
+
+            # v2: 目标波动率缩放
+            target_volatility = PARAMS.get("target_volatility", 0.0)
+            if target_volatility > 0:
+                target_weights = _apply_volatility_scaling(
+                    target_weights, returns_df, target_volatility
+                )
+                print(f"  目标波动率: {target_volatility:.2%}")
+
             print(f"{'=' * 70}\n")
 
         return {
