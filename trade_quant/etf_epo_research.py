@@ -35,6 +35,10 @@ ETF_POOL = [
     "159980.XSHE",
     "561360.XSHG",
     "511260.XSHG",
+    # v2: 新增ETF
+    "561550.XSHG",  # 中证500ETF
+    "159259.XSHE",  # 成长ETF
+    "159263.XSHE",  # 价值ETF
 ]
 ETF_NAME_MAP = {
     "518880.XSHG": "黄金ETF",
@@ -44,9 +48,18 @@ ETF_NAME_MAP = {
     "159980.XSHE": "有色ETF大成",
     "561360.XSHG": "石油ETF",
     "511260.XSHG": "十年国债ETF",
+    # v2: 新增ETF
+    "561550.XSHG": "中证500ETF",
+    "159259.XSHE": "成长ETF",
+    "159263.XSHE": "价值ETF",
 }
 BOND_ETFS = {"511260.XSHG"}
-A_SHARE_ETFS = {"159915.XSHE"}
+A_SHARE_ETFS = {
+    "159915.XSHE",  # 创业板
+    "561550.XSHG",  # 中证500
+    "159259.XSHE",  # 成长
+    "159263.XSHE",  # 价值
+}
 INDUSTRY_ETFS = {"159980.XSHE", "561360.XSHG"}
 PREMIUM_ETFS = {"513100.XSHG"}
 
