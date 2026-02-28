@@ -341,7 +341,7 @@ def _print_daily_summary(context, positions):
 
 
 def _print_cumulative_pnl(positions, cumulative_pnl):
-    """打印累计收益表格（收益率版本）"""
+    """打印累计收益表格"""
     if not positions:
         return
 
@@ -350,27 +350,20 @@ def _print_cumulative_pnl(positions, cumulative_pnl):
             "ETF代码",
             "ETF名称",
             "累计收益",
-            "累计成本",
-            "收益率",
+            "当前持仓盈亏",
+            "占比",
         ]
     )
     table.hrules = prettytable.ALL
     table.align = "l"
     table.align = "r"
 
-    # 计算总收益和总成本
     total_pnl = sum([v for k, v in cumulative_pnl.items() if not k.endswith('_last')])
-    total_cost = sum(list(g.cumulative_cost.values()))
 
     for etf in positions.keys():
         cum_pnl = cumulative_pnl.get(etf, 0)
-        cost = g.cumulative_cost.get(etf, 0)
-
-        # 计算收益率
-        if cost > 0:
-            pnl_ratio = cum_pnl / cost * 100
-        else:
-            pnl_ratio = 0
+        current_pnl = cumulative_pnl.get(etf + '_last', 0)
+        pnl_ratio = cum_pnl / total_pnl if total_pnl != 0 else 0
 
         pnl_emoji = "📈" if cum_pnl > 0 else "📉" if cum_pnl < 0 else "➡️"
 
@@ -379,19 +372,13 @@ def _print_cumulative_pnl(positions, cumulative_pnl):
                 _format_etf_code(etf),
                 _get_etf_name(etf),
                 f"{pnl_emoji} ¥{cum_pnl:+,.0f}",
-                f"¥{cost:,.0f}",
-                f"{pnl_ratio:+.2f}%",
+                f"¥{current_pnl:+,.0f}",
+                f"{pnl_ratio * 100:.1f}%" if total_pnl != 0 else "N/A",
             ]
         )
 
-    # 计算总收益率
-    if total_cost > 0:
-        total_ratio = total_pnl / total_cost * 100
-    else:
-        total_ratio = 0
-
     log.info(f"\n📊 累计收益:\n{table}\n")
-    log.info(f"💎 总累计收益: ¥{total_pnl:+,.0f} | 总成本: ¥{total_cost:,.0f} | 总收益率: {total_ratio:+.2f}%")
+    log.info(f"💎 总累计收益: ¥{total_pnl:+,.0f}")
 
 
 def _print_rebalance_summary(changes):
@@ -599,9 +586,8 @@ def initialize(context):
     g.factor_df = None
     # v2: 记录Ledoit-Wolf收缩强度用于监控
     g.last_shrinkage = None
-    # v2: 累计收益和成本记录
-    g.cumulative_pnl = {}  # {etf: cumulative_pnl_amount} 已实现收益
-    g.cumulative_cost = {}  # {etf: cumulative_cost} 累计投入成本
+    # v2: 累计收益记录
+    g.cumulative_pnl = {}  # {etf: cumulative_pnl_amount}
     g.total_pnl = 0  # 总累计收益
 
     run_weekly(calc_factors, weekday=g.rebalance_weekday, time=g.factor_time)
@@ -974,31 +960,16 @@ def rebalance(context):
         pnl_amount = (current_price - avg_cost) * shares
         current_pnl[etf] = pnl_amount
 
-    # 记录每个ETF的累计收益率
+    # 记录每个ETF的累计收益
     for etf in g.etf_pool:
         realized = g.cumulative_pnl.get(etf, 0)
         unrealized = current_pnl.get(etf, 0)
-        total_pnl_etf = realized + unrealized
-        total_cost = g.cumulative_cost.get(etf, 0)
-
-        # 计算收益率（避免除零）
-        if total_cost > 0:
-            pnl_ratio = total_pnl_etf / total_cost * 100  # 转换为百分比
-        else:
-            pnl_ratio = 0
-
+        pnl = realized + unrealized
         record_name = "etf_" + etf.replace('.', '_').replace('-', '_')
-        record(**{record_name: pnl_ratio})
-
-    # 记录总累计收益率（基于总成本）
-    total_realized = sum(list(g.cumulative_pnl.values()))
-    total_unrealized = sum(list(current_pnl.values()))
-    total_cost_all = sum(list(g.cumulative_cost.values()))
-    if total_cost_all > 0:
-        total_pnl_ratio = (total_realized + total_unrealized) / total_cost_all * 100
-    else:
-        total_pnl_ratio = 0
-    record(total_pnl=total_pnl_ratio)
+        record(**{record_name: pnl})
+    # 记录总累计收益
+    total_pnl = sum(list(g.cumulative_pnl.values())) + sum(list(current_pnl.values()))
+    record(total_pnl=total_pnl)
 
 
 # ============ 订单执行 ============
@@ -1061,12 +1032,7 @@ def _execute_orders(context, target_weights):
         current_pos = context.portfolio.positions.get(etf)
         current_shares = current_pos.total_amount if current_pos else 0
         if shares > current_shares:
-            # v2: 记录累计成本（加仓部分）
-            bought_shares = shares - current_shares
-            price = current_data[etf].last_price
-            added_cost = bought_shares * price
-            g.cumulative_cost[etf] = g.cumulative_cost.get(etf, 0) + added_cost
-            log.info(f"🟢 加仓 {_format_etf_code(etf)}: {current_shares} -> {shares}股 (成本+¥{added_cost:,.0f})")
+            log.info(f"🟢 加仓 {_format_etf_code(etf)}: {current_shares} -> {shares}股")
             order_target(etf, shares)
 
 
