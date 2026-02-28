@@ -330,8 +330,9 @@ def _print_daily_summary(context, positions):
         unrealized = current_pnl.get(etf, 0)
         pnl = realized + unrealized
         # 将ETF代码转换为可用的record名称
-        record_name = etf.replace('.', '_').replace('-', '_')
-        record(record_name, pnl)
+        record_name = "etf_" + etf.replace('.', '_').replace('-', '_')
+        # 使用关键字参数
+        record(**{record_name: pnl})
     # 记录总累计收益
     record(total_pnl=total_pnl)
 
