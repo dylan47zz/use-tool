@@ -314,9 +314,9 @@ def _print_daily_summary(context, positions):
         pnl_amount = (current_price - avg_cost) * shares
         current_pnl[etf] = pnl_amount
 
-    # 计算总累计收益 = 历史已实现盈亏 + 当前持仓盈亏
+    # 计算总已实现盈亏累计收益 = 历史 + 当前持仓盈亏
     # g.cumulative_pnl 存储的是历史已实现盈亏
-    total_pnl = sum(g.cumulative_pnl.values()) + sum(current_pnl.values())
+    total_pnl = sum(list(g.cumulative_pnl.values())) + sum(list(current_pnl.values()))
 
     # 打印累计收益表格
     all_pnl = {**{k: v for k, v in g.cumulative_pnl.items()}, **current_pnl}
