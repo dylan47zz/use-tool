@@ -121,6 +121,8 @@ PARAMS = {
     "dd_penalty_threshold": 0.05,
     "dd_penalty_power": 1.0,
     "dd_penalty_floor": 0.6,
+    # v2: 信号权重模式
+    "signal_weight_mode": "fixed",  # fixed/trend/strength
 }
 
 
@@ -409,6 +411,72 @@ def _apply_volatility_scaling(target_weights, returns_df, target_volatility):
     return scaled_weights
 
 
+def _get_signal_weights(mode, returns_df=None, signals=None):
+    """
+    根据不同模式计算动量/质量权重
+
+    Args:
+        mode: 信号权重模式
+            'fixed': 使用固定权重(score_weight_momentum, score_weight_quality)
+            'trend': 根据趋势调整（牛市动量高，熊市质量高）
+            'strength': 根据信号强度调整（强信号动量高，弱信号质量高）
+        returns_df: 收益率矩阵（用于趋势模式）
+        signals: 信号向量（用于信号强度模式）
+
+    Returns:
+        (momentum_weight, quality_weight)
+    """
+    if mode == 'fixed':
+        # 固定权重：使用参数中的值
+        return PARAMS["score_weight_momentum"], PARAMS["score_weight_quality"]
+
+    elif mode == 'trend':
+        # 方案2：根据趋势调整
+        if returns_df is None:
+            print("【信号权重】trend模式需要returns_df，退回固定权重")
+            return PARAMS["score_weight_momentum"], PARAMS["score_weight_quality"]
+
+        trend = _get_market_trend(returns_df)
+
+        if trend == 'bull':
+            # 牛市：动量权重高
+            momentum_w, quality_w = 0.7, 0.3
+        elif trend == 'bear':
+            # 熊市：质量权重高
+            momentum_w, quality_w = 0.3, 0.7
+        else:
+            # 震荡市：平衡
+            momentum_w, quality_w = 0.5, 0.5
+
+        print(f"【信号权重】趋势={trend}, 动量权重={momentum_w}, 质量权重={quality_w}")
+        return momentum_w, quality_w
+
+    elif mode == 'strength':
+        # 方案3：根据信号强度调整
+        if signals is None:
+            print("【信号权重】strength模式需要signals，退回固定权重")
+            return PARAMS["score_weight_momentum"], PARAMS["score_weight_quality"]
+
+        avg_signal = np.mean(signals)
+
+        if avg_signal > 0.7:
+            # 信号都很强：动量权重高
+            momentum_w, quality_w = 0.7, 0.3
+        elif avg_signal < 0.4:
+            # 信号都很弱：质量权重高
+            momentum_w, quality_w = 0.3, 0.7
+        else:
+            # 中等信号：平衡
+            momentum_w, quality_w = 0.5, 0.5
+
+        print(f"【信号权重】信号强度={avg_signal:.3f}, 动量权重={momentum_w}, 质量权重={quality_w}")
+        return momentum_w, quality_w
+
+    else:
+        print(f"【信号权重】未知模式={mode}，使用固定权重")
+        return PARAMS["score_weight_momentum"], PARAMS["score_weight_quality"]
+
+
 def _build_anchor_signal(etfs, price_cache):
     """构建锚定信号（基于波动率，与回测环境一致）"""
     vol_forecasts = []
@@ -661,11 +729,18 @@ def calculate_for_date(calc_date_str, verbose=True):
             ]
         ].mean(axis=1)
 
-        # 信号计算
-        df["signal"] = (
-            PARAMS["score_weight_momentum"] * df["momentum_score"]
-            + PARAMS["score_weight_quality"] * df["quality_score"]
-        )
+        # 信号计算 - v2: 支持动态权重模式
+        signal_weight_mode = PARAMS.get("signal_weight_mode", "fixed")
+        if signal_weight_mode != "fixed":
+            momentum_w, quality_w = _get_signal_weights(
+                signal_weight_mode, returns_df, df["momentum_score"].values
+            )
+            df["signal"] = momentum_w * df["momentum_score"] + quality_w * df["quality_score"]
+        else:
+            df["signal"] = (
+                PARAMS["score_weight_momentum"] * df["momentum_score"]
+                + PARAMS["score_weight_quality"] * df["quality_score"]
+            )
 
         if verbose:
             print("\n【诊断日志：质量分和综合信号】")
