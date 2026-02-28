@@ -305,6 +305,36 @@ def _print_daily_summary(context, positions):
     log.info(f"📊 持仓市值: ¥{total_market_value:,.2f}")
     log.info(f"\n{table}\n")
 
+    # v2: 计算并记录累计收益（当前持仓的未实现盈亏）
+    current_pnl = {}  # 当前持仓盈亏
+    for etf, pos in positions.items():
+        current_price = pos.price
+        avg_cost = pos.avg_cost
+        shares = pos.total_amount
+        pnl_amount = (current_price - avg_cost) * shares
+        current_pnl[etf] = pnl_amount
+
+    # 计算总累计收益 = 历史已实现盈亏 + 当前持仓盈亏
+    # g.cumulative_pnl 存储的是历史已实现盈亏
+    total_pnl = sum(g.cumulative_pnl.values()) + sum(current_pnl.values())
+
+    # 打印累计收益表格
+    all_pnl = {**{k: v for k, v in g.cumulative_pnl.items()}, **current_pnl}
+    if all_pnl:
+        _print_cumulative_pnl(positions, all_pnl)
+
+    # 使用record记录每个ETF的累计收益（用于收益曲线）
+    for etf in g.etf_pool:
+        # 累计收益 = 历史已实现 + 当前持仓
+        realized = g.cumulative_pnl.get(etf, 0)
+        unrealized = current_pnl.get(etf, 0)
+        pnl = realized + unrealized
+        # 将ETF代码转换为可用的record名称
+        record_name = etf.replace('.', '_').replace('-', '_')
+        record(record_name, pnl)
+    # 记录总累计收益
+    record(total_pnl=total_pnl)
+
     category_weights = {}
     for etf in positions.keys():
         category = _get_etf_category(etf)
@@ -320,6 +350,47 @@ def _print_daily_summary(context, positions):
         ]
     )
     log.info(f"📈 分类配置: {cat_str}")
+
+
+def _print_cumulative_pnl(positions, cumulative_pnl):
+    """打印累计收益表格"""
+    if not positions:
+        return
+
+    table = PrettyTable(
+        [
+            "ETF代码",
+            "ETF名称",
+            "累计收益",
+            "当前持仓盈亏",
+            "占比",
+        ]
+    )
+    table.hrules = prettytable.ALL
+    table.align = "l"
+    table.align = "r"
+
+    total_pnl = sum([v for k, v in cumulative_pnl.items() if not k.endswith('_last')])
+
+    for etf in positions.keys():
+        cum_pnl = cumulative_pnl.get(etf, 0)
+        current_pnl = cumulative_pnl.get(etf + '_last', 0)
+        pnl_ratio = cum_pnl / total_pnl if total_pnl != 0 else 0
+
+        pnl_emoji = "📈" if cum_pnl > 0 else "📉" if cum_pnl < 0 else "➡️"
+
+        table.add_row(
+            [
+                _format_etf_code(etf),
+                _get_etf_name(etf),
+                f"{pnl_emoji} ¥{cum_pnl:+,.0f}",
+                f"¥{current_pnl:+,.0f}",
+                f"{pnl_ratio * 100:.1f}%" if total_pnl != 0 else "N/A",
+            ]
+        )
+
+    log.info(f"\n📊 累计收益:\n{table}\n")
+    log.info(f"💎 总累计收益: ¥{total_pnl:+,.0f}")
 
 
 def _print_rebalance_summary(changes):
@@ -527,6 +598,9 @@ def initialize(context):
     g.factor_df = None
     # v2: 记录Ledoit-Wolf收缩强度用于监控
     g.last_shrinkage = None
+    # v2: 累计收益记录
+    g.cumulative_pnl = {}  # {etf: cumulative_pnl_amount}
+    g.total_pnl = 0  # 总累计收益
 
     run_weekly(calc_factors, weekday=g.rebalance_weekday, time=g.factor_time)
     run_weekly(rebalance, weekday=g.rebalance_weekday, time=g.rebalance_time)
@@ -917,6 +991,12 @@ def _execute_orders(context, target_weights):
     # 卖出不在目标列表中的持仓
     for etf in list(context.portfolio.positions.keys()):
         if etf not in target_shares and not current_data[etf].paused:
+            # v2: 记录已实现收益
+            pos = context.portfolio.positions.get(etf)
+            if pos:
+                realized_pnl = (pos.price - pos.avg_cost) * pos.total_amount
+                g.cumulative_pnl[etf] = g.cumulative_pnl.get(etf, 0) + realized_pnl
+                log.info(f"📊 已实现收益: {_format_etf_code(etf)} = ¥{realized_pnl:+,.0f}")
             log.info(f"🔴 卖出 {_format_etf_code(etf)} ({_get_etf_name(etf)})")
             order_target(etf, 0)
 
@@ -927,6 +1007,12 @@ def _execute_orders(context, target_weights):
         current_pos = context.portfolio.positions.get(etf)
         current_shares = current_pos.total_amount if current_pos else 0
         if shares < current_shares:
+            # v2: 记录已实现收益（减仓部分）
+            sold_shares = current_shares - shares
+            price = current_data[etf].last_price
+            realized_pnl = (price - current_pos.avg_cost) * sold_shares
+            g.cumulative_pnl[etf] = g.cumulative_pnl.get(etf, 0) + realized_pnl
+            log.info(f"📊 已实现收益: {_format_etf_code(etf)} = ¥{realized_pnl:+,.0f} (减仓{sold_shares}股)")
             log.info(f"🔴 减仓 {_format_etf_code(etf)}: {current_shares} -> {shares}股")
             order_target(etf, shares)
 
