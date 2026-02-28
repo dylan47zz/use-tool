@@ -323,19 +323,6 @@ def _print_daily_summary(context, positions):
     if all_pnl:
         _print_cumulative_pnl(positions, all_pnl)
 
-    # 使用record记录每个ETF的累计收益（用于收益曲线）
-    for etf in g.etf_pool:
-        # 累计收益 = 历史已实现 + 当前持仓
-        realized = g.cumulative_pnl.get(etf, 0)
-        unrealized = current_pnl.get(etf, 0)
-        pnl = realized + unrealized
-        # 将ETF代码转换为可用的record名称
-        record_name = "etf_" + etf.replace('.', '_').replace('-', '_')
-        # 使用关键字参数
-        record(**{record_name: pnl})
-    # 记录总累计收益
-    record(total_pnl=total_pnl)
-
     category_weights = {}
     for etf in positions.keys():
         category = _get_etf_category(etf)
@@ -962,6 +949,27 @@ def rebalance(context):
 
     _print_rebalance_summary(changes)
     _execute_orders(context, target_weights)
+
+    # v2: 调仓时记录每个ETF的累计收益（每周一次，提高回测速度）
+    positions = context.portfolio.positions
+    current_pnl = {}
+    for etf, pos in positions.items():
+        current_price = pos.price
+        avg_cost = pos.avg_cost
+        shares = pos.total_amount
+        pnl_amount = (current_price - avg_cost) * shares
+        current_pnl[etf] = pnl_amount
+
+    # 记录每个ETF的累计收益
+    for etf in g.etf_pool:
+        realized = g.cumulative_pnl.get(etf, 0)
+        unrealized = current_pnl.get(etf, 0)
+        pnl = realized + unrealized
+        record_name = "etf_" + etf.replace('.', '_').replace('-', '_')
+        record(**{record_name: pnl})
+    # 记录总累计收益
+    total_pnl = sum(list(g.cumulative_pnl.values())) + sum(list(current_pnl.values()))
+    record(total_pnl=total_pnl)
 
 
 # ============ 订单执行 ============
