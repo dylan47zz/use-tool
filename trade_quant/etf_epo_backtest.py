@@ -305,24 +305,6 @@ def _print_daily_summary(context, positions):
     log.info(f"📊 持仓市值: ¥{total_market_value:,.2f}")
     log.info(f"\n{table}\n")
 
-    # v2: 计算并记录累计收益（当前持仓的未实现盈亏）
-    current_pnl = {}  # 当前持仓盈亏
-    for etf, pos in positions.items():
-        current_price = pos.price
-        avg_cost = pos.avg_cost
-        shares = pos.total_amount
-        pnl_amount = (current_price - avg_cost) * shares
-        current_pnl[etf] = pnl_amount
-
-    # 计算总已实现盈亏累计收益 = 历史 + 当前持仓盈亏
-    # g.cumulative_pnl 存储的是历史已实现盈亏
-    total_pnl = sum(list(g.cumulative_pnl.values())) + sum(list(current_pnl.values()))
-
-    # 打印累计收益表格
-    all_pnl = {**{k: v for k, v in g.cumulative_pnl.items()}, **current_pnl}
-    if all_pnl:
-        _print_cumulative_pnl(positions, all_pnl)
-
     category_weights = {}
     for etf in positions.keys():
         category = _get_etf_category(etf)
@@ -338,47 +320,6 @@ def _print_daily_summary(context, positions):
         ]
     )
     log.info(f"📈 分类配置: {cat_str}")
-
-
-def _print_cumulative_pnl(positions, cumulative_pnl):
-    """打印累计收益表格"""
-    if not positions:
-        return
-
-    table = PrettyTable(
-        [
-            "ETF代码",
-            "ETF名称",
-            "累计收益",
-            "当前持仓盈亏",
-            "占比",
-        ]
-    )
-    table.hrules = prettytable.ALL
-    table.align = "l"
-    table.align = "r"
-
-    total_pnl = sum([v for k, v in cumulative_pnl.items() if not k.endswith('_last')])
-
-    for etf in positions.keys():
-        cum_pnl = cumulative_pnl.get(etf, 0)
-        current_pnl = cumulative_pnl.get(etf + '_last', 0)
-        pnl_ratio = cum_pnl / total_pnl if total_pnl != 0 else 0
-
-        pnl_emoji = "📈" if cum_pnl > 0 else "📉" if cum_pnl < 0 else "➡️"
-
-        table.add_row(
-            [
-                _format_etf_code(etf),
-                _get_etf_name(etf),
-                f"{pnl_emoji} ¥{cum_pnl:+,.0f}",
-                f"¥{current_pnl:+,.0f}",
-                f"{pnl_ratio * 100:.1f}%" if total_pnl != 0 else "N/A",
-            ]
-        )
-
-    log.info(f"\n📊 累计收益:\n{table}\n")
-    log.info(f"💎 总累计收益: ¥{total_pnl:+,.0f}")
 
 
 def _print_rebalance_summary(changes):
@@ -564,7 +505,7 @@ def initialize(context):
     g.shrinkage_floor = 0.05  # 最小收缩强度（0表示完全信任样本协方差）
     g.shrinkage_cap = 0.3  # 最大收缩强度（1表示完全使用目标矩阵）
     # v2: 目标波动率版本 - 控制仓位而不是永远满仓
-    g.target_volatility = 0.15  # 目标年化波动率（12%），0表示不使用波动率缩放（满仓）
+    g.target_volatility = 0  # 目标年化波动率（12%），0表示不使用波动率缩放（满仓）
 
     # 成交拥挤度惩罚
     g.volume_ratio_threshold = 1.6
@@ -586,9 +527,6 @@ def initialize(context):
     g.factor_df = None
     # v2: 记录Ledoit-Wolf收缩强度用于监控
     g.last_shrinkage = None
-    # v2: 累计收益记录
-    g.cumulative_pnl = {}  # {etf: cumulative_pnl_amount}
-    g.total_pnl = 0  # 总累计收益
 
     run_weekly(calc_factors, weekday=g.rebalance_weekday, time=g.factor_time)
     run_weekly(rebalance, weekday=g.rebalance_weekday, time=g.rebalance_time)
@@ -851,12 +789,8 @@ def rebalance(context):
     # v2: 使用Ledoit-Wolf统计最优收缩估计
     weights = _epo_weights(returns_df, signals)
 
-    # ====== 调试日志：EPO权重（未归一化）======
-    log.info(f"【LW调试】EPO原始权重(raw): {dict(zip(list(returns_df.columns), weights))}")
-
     if g.use_risk_parity:
         weights = _apply_risk_parity(weights, returns_df)
-        log.info(f"【LW调试】RiskParity后权重: {dict(zip(list(returns_df.columns), weights))}")
 
     # 成交拥挤度惩罚
     penalties = []
@@ -889,7 +823,6 @@ def rebalance(context):
         penalties = penalties * dd_penalty
 
     weights = _normalize(np.array(weights) * penalties)
-    log.info(f"【LW调试】Penalty归一化后权重: {dict(zip(list(returns_df.columns), weights))}")
 
     a_share_cap = g.a_share_weight_cap
     if g.use_dynamic_a_share_cap:
@@ -915,17 +848,14 @@ def rebalance(context):
 
     if max_weight:
         weights = _apply_weight_cap(weights, max_weight)
-    log.info(f"【LW调试】MaxWeight限制后权重: {dict(zip(list(returns_df.columns), weights))}")
     target_weights = dict(zip(returns_df.columns, weights))
 
     # 债券保底配置：确保债券有最低仓位
     target_weights = _apply_bond_floor(target_weights, factor_df)
-    log.info(f"【LW调试】BondFloor后最终权重: {target_weights}")
 
     # v2: 目标波动率版本 - 缩放仓位
     if g.target_volatility > 0:
         target_weights = _apply_volatility_scaling(target_weights, returns_df, g.target_volatility)
-        log.info(f"【LW调试】波动率缩放后权重: {target_weights}")
 
     _print_header(f"🔄 调仓执行 - {context.current_dt.strftime('%Y-%m-%d')}")
     _print_weight_table(target_weights, factor_df, context.portfolio.total_value)
@@ -949,27 +879,6 @@ def rebalance(context):
 
     _print_rebalance_summary(changes)
     _execute_orders(context, target_weights)
-
-    # v2: 调仓时记录每个ETF的累计收益（每周一次，提高回测速度）
-    positions = context.portfolio.positions
-    current_pnl = {}
-    for etf, pos in positions.items():
-        current_price = pos.price
-        avg_cost = pos.avg_cost
-        shares = pos.total_amount
-        pnl_amount = (current_price - avg_cost) * shares
-        current_pnl[etf] = pnl_amount
-
-    # 记录每个ETF的累计收益
-    for etf in g.etf_pool:
-        realized = g.cumulative_pnl.get(etf, 0)
-        unrealized = current_pnl.get(etf, 0)
-        pnl = realized + unrealized
-        record_name = "etf_" + etf.replace('.', '_').replace('-', '_')
-        record(**{record_name: pnl})
-    # 记录总累计收益
-    total_pnl = sum(list(g.cumulative_pnl.values())) + sum(list(current_pnl.values()))
-    record(total_pnl=total_pnl)
 
 
 # ============ 订单执行 ============
@@ -1000,12 +909,6 @@ def _execute_orders(context, target_weights):
     # 卖出不在目标列表中的持仓
     for etf in list(context.portfolio.positions.keys()):
         if etf not in target_shares and not current_data[etf].paused:
-            # v2: 记录已实现收益
-            pos = context.portfolio.positions.get(etf)
-            if pos:
-                realized_pnl = (pos.price - pos.avg_cost) * pos.total_amount
-                g.cumulative_pnl[etf] = g.cumulative_pnl.get(etf, 0) + realized_pnl
-                log.info(f"📊 已实现收益: {_format_etf_code(etf)} = ¥{realized_pnl:+,.0f}")
             log.info(f"🔴 卖出 {_format_etf_code(etf)} ({_get_etf_name(etf)})")
             order_target(etf, 0)
 
@@ -1016,12 +919,6 @@ def _execute_orders(context, target_weights):
         current_pos = context.portfolio.positions.get(etf)
         current_shares = current_pos.total_amount if current_pos else 0
         if shares < current_shares:
-            # v2: 记录已实现收益（减仓部分）
-            sold_shares = current_shares - shares
-            price = current_data[etf].last_price
-            realized_pnl = (price - current_pos.avg_cost) * sold_shares
-            g.cumulative_pnl[etf] = g.cumulative_pnl.get(etf, 0) + realized_pnl
-            log.info(f"📊 已实现收益: {_format_etf_code(etf)} = ¥{realized_pnl:+,.0f} (减仓{sold_shares}股)")
             log.info(f"🔴 减仓 {_format_etf_code(etf)}: {current_shares} -> {shares}股")
             order_target(etf, shares)
 
@@ -1070,10 +967,7 @@ def _epo_weights(returns_df, signals):
     if returns_df.shape[0] < 2 or n == 0:
         return np.ones(n) / max(n, 1)
 
-    assets = list(returns_df.columns)
-
     # v2: 使用Ledoit-Wolf统计最优收缩估计
-    # 保存样本协方差用于对比调试
     sample_cov = returns_df.cov().values
 
     if g.use_ledoit_wolf and _LEDOIT_WOLF_AVAILABLE:
@@ -1104,20 +998,6 @@ def _epo_weights(returns_df, signals):
         shrunk = sample_cov
         g.last_shrinkage = 0.0
 
-    # ====== 调试日志：对比协方差矩阵差异 ======
-    # 不加正则化的对比（加正则化后差异会被稀释）
-    cov_diff = shrunk - sample_cov
-    cov_diff_norm = np.linalg.norm(cov_diff, 'fro')
-    cov_diff_max = np.max(np.abs(cov_diff))
-    log.info(f"【LW调试】收缩强度={g.last_shrinkage:.4f}, 协方差矩阵Frobenius范数差异={cov_diff_norm:.6f}, 最大元素差异={cov_diff_max:.6f}")
-
-    # 样本协方差逆矩阵（用于对比）
-    sample_cov_stable = sample_cov + np.eye(n) * 1e-6
-    try:
-        inv_sample_cov = np.linalg.inv(sample_cov_stable)
-    except:
-        inv_sample_cov = np.pinv(sample_cov_stable)
-
     # 确保正定性（数值稳定性）
     shrunk = shrunk + np.eye(n) * 1e-6
 
@@ -1126,32 +1006,10 @@ def _epo_weights(returns_df, signals):
     except np.linalg.LinAlgError:
         inv_cov = np.pinv(shrunk)
 
-    # ====== 调试日志：对比逆矩阵差异 ======
-    inv_diff = inv_cov - inv_sample_cov
-    inv_diff_norm = np.linalg.norm(inv_diff, 'fro')
-    log.info(f"【LW调试】逆矩阵Frobenius范数差异={inv_diff_norm:.6f}")
-
     raw = inv_cov.dot(signals)
 
     # 仅做多约束
     raw = np.maximum(0, raw)
-
-    # ====== 调试日志：对比raw权重差异 ======
-    raw_sample = inv_sample_cov.dot(signals)
-    raw_sample = np.maximum(0, raw_sample)
-
-    raw_diff = raw - raw_sample
-    raw_diff_norm = np.linalg.norm(raw_diff, 1)  # L1范数更能反映绝对差异
-    raw_diff_max = np.max(np.abs(raw_diff))
-    log.info(f"【LW调试】Raw权重L1范数差异={raw_diff_norm:.6f}, 最大元素差异={raw_diff_max:.6f}")
-    # 打印各资产权重对比
-    weight_diff = {}
-    for i, asset in enumerate(assets):
-        diff = raw[i] - raw_sample[i]
-        if abs(diff) > 1e-6:  # 只打印有差异的
-            weight_diff[asset] = diff
-    if weight_diff:
-        log.info(f"【LW调试】权重差异: {weight_diff}")
 
     # v2优化：返回未归一化的raw权重，让调用方统一归一化
     # 这样Ledoit-Wolf的协方差矩阵优化效果能更直接地体现在最终权重中
@@ -1619,8 +1477,6 @@ def _adjust_weights_for_trading(target_weights, current_data, total_value):
 
     # v2: 恢复原始仓位比例，保留波动率缩放效果
     weights = np.array(weights, dtype=float) * original_total
-    # 再次归一化确保总和正确
-    weights = _normalize(weights)
 
     result = dict(zip(assets, weights))
 
@@ -1867,8 +1723,6 @@ def _apply_volatility_scaling(target_weights, returns_df, target_volatility):
     else:
         base_position = 0.7  # 震荡市7成仓
 
-    log.info(f"【波动率缩放】市场趋势={trend}, 基础仓位={base_position:.0%}")
-
     # ========== 第二层：波动率微调 ==========
     # 构建权重向量
     w = np.array([target_weights.get(a, 0) for a in assets])
@@ -1896,8 +1750,9 @@ def _apply_volatility_scaling(target_weights, returns_df, target_volatility):
     final_position = base_position * vol_adjustment
     final_position = min(final_position, 1.0)  # 最大满仓
 
-    # 打印调试信息
-    log.info(f"【波动率缩放】组合波动率={portfolio_vol:.2%}, 目标={target_volatility:.2%}, 波动微调={vol_adjustment:.0%}, 最终仓位={final_position:.0%}")
+    # 仅在非满仓时打印波动率缩放信息
+    if final_position < 1.0:
+        log.info(f"【波动率缩放】组合波动率={portfolio_vol:.2%}, 目标={target_volatility:.2%}, 最终仓位={final_position:.0%}")
 
     # 应用缩放
     scaled_weights = {a: w[i] * final_position for i, a in enumerate(assets)}

@@ -107,10 +107,10 @@ PARAMS = {
     "anchor_weight": 0.1,  # 锚定信号权重
     "use_ledoit_wolf": True,
     # v2: 可选，设置收缩强度的上下限（Ledoit-Wolf自动计算的结果会被限制在此范围内）
-    "shrinkage_floor": 0.0,  # 最小收缩强度（0表示完全信任样本协方差）
+    "shrinkage_floor": 0.05,  # 最小收缩强度（0表示完全信任样本协方差）
     "shrinkage_cap": 0.3,  # 最大收缩强度（1表示完全使用目标矩阵）
     # v2: 目标波动率（0表示不使用，保持满仓）
-    "target_volatility": 0.0,
+    "target_volatility": 0.15,
     "volume_ratio_threshold": 1.6,
     "volume_penalty_power": 0.8,
     "use_relative_crowding": True,
