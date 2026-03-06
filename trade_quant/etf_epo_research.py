@@ -1138,7 +1138,7 @@ def calculate_for_date(calc_date_str, verbose=True):
                 pen = ratio ** (-PARAMS["volume_penalty_power"])
             penalties.append(pen)
 
-        if PARAMS["use_relative_crowding"]:
+        if False:  # 临时禁用相对拥挤惩罚
             ratios = df.loc[actual_selected, "volume_ratio"].astype(float)
             median = np.nanmedian(ratios.values)
             if median and not np.isnan(median):
