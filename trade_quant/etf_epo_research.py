@@ -1122,6 +1122,14 @@ def calculate_for_date(calc_date_str, verbose=True):
             print(f"权重总和: {np.sum(weights) * 100:.4f}%")
 
         # 拥挤度惩罚
+        # 打印关键指标用于调试
+        if verbose:
+            vr_dict = {etf: df.loc[etf, "volume_ratio"] for etf in actual_selected}
+            dd_dict = {etf: df.loc[etf, "trend_dd"] for etf in actual_selected}
+            print(f"\n【惩罚前诊断】")
+            print(f"放量比(volume_ratio): {vr_dict}")
+            print(f"回撤(trend_dd): {dd_dict}")
+        
         penalties = []
         for etf in actual_selected:
             ratio = df.loc[etf, "volume_ratio"]
