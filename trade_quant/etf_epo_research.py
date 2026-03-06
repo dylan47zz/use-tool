@@ -1121,6 +1121,23 @@ def calculate_for_date(calc_date_str, verbose=True):
                 print(f"  {etf}: {val * 100:.4f}%")
             print(f"权重总和: {np.sum(weights) * 100:.4f}%")
 
+        # 过滤权重太小的 ETF（模拟回测环境的 _adjust_weights_for_trading）
+        # 如果某个 ETF 权重太小（< 1%），重新归一化后重新分配
+        min_weight_threshold = 0.01  # 1% 以下的 ETF 被过滤
+        filtered = [etf for etf, w in zip(actual_selected, weights) if w < min_weight_threshold]
+        if filtered:
+            if verbose:
+                print(f"\n【ETF过滤】过滤掉权重<1%的ETF: {filtered}")
+            mask = np.array([w >= min_weight_threshold for w in weights])
+            weights = weights[mask]
+            actual_selected = [etf for etf, m in zip(actual_selected, mask) if m]
+            if len(weights) > 0:
+                weights = weights / np.sum(weights)
+            else:
+                weights = np.array([1.0 / len(actual_selected)] * len(actual_selected))
+            if verbose:
+                print(f"过滤后剩余: {actual_selected}, 权重: {weights}")
+
         # 拥挤度惩罚
         # 打印关键指标用于调试
         if verbose:
