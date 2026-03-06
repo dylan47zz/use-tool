@@ -1157,43 +1157,6 @@ def calculate_for_date(calc_date_str, verbose=True):
         # 调试：保存惩罚前权重用于对比
         weights_before_penalty = weights.copy()
 
-        # 详细的惩罚计算日志
-        if verbose:
-            print(f"\n【详细惩罚计算】")
-            print(f"放量比阈值: {PARAMS['volume_ratio_threshold']}, 惩罚幂: {PARAMS['volume_penalty_power']}")
-            print(f"相对拥挤阈值: [{PARAMS['relative_crowding_floor']}, {PARAMS['relative_crowding_ceiling']}]")
-            print(f"回撤惩罚阈值: {PARAMS.get('dd_penalty_threshold')}, 幂: {PARAMS.get('dd_penalty_power')}, 地板: {PARAMS.get('dd_penalty_floor')}")
-            
-            # 打印每个ETF的详细惩罚计算
-            vol_ratios = df.loc[actual_selected, "volume_ratio"]
-            vol_median = np.nanmedian(vol_ratios.values)
-            trend_dds = df.loc[actual_selected, "trend_dd"]
-            
-            for i, etf in enumerate(actual_selected):
-                vr = vol_ratios[etf]
-                dd = trend_dds[etf]
-                
-                # 基础惩罚
-                base_pen = 1.0
-                if vr > PARAMS["volume_ratio_threshold"]:
-                    base_pen = vr ** (-PARAMS["volume_penalty_power"])
-                
-                # 相对拥挤惩罚
-                rel = vr / vol_median if vol_median > 0 else 1.0
-                rel = np.clip(rel, PARAMS["relative_crowding_floor"], PARAMS["relative_crowding_ceiling"])
-                rel_pen = rel ** (-PARAMS["relative_crowding_power"])
-                
-                # 回撤惩罚
-                dd_pen = 1.0
-                dd_thresh = PARAMS.get("dd_penalty_threshold", 0.05)
-                if dd > dd_thresh:
-                    dd_pen = (dd / dd_thresh) ** (-PARAMS.get("dd_penalty_power", 1.0))
-                    dd_pen = max(dd_pen, PARAMS.get("dd_penalty_floor", 0.6))
-                
-                total_pen = base_pen * rel_pen * dd_pen
-                
-                print(f"  {etf}: 放量比={vr:.2f}, 回撤={dd:.4f}, 基础={base_pen:.4f}, 相对={rel_pen:.4f}, 回撤={dd_pen:.4f}, 总={total_pen:.4f}")
-
         # 测试：打印惩罚前后的权重对比
         if verbose:
             print(f"\n【惩罚对比测试】")
