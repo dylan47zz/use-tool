@@ -340,6 +340,77 @@ def _get_market_trend(returns_df):
         return 'consolidation'  # 震荡市
 
 
+
+
+def _dynamic_a_share_cap(assets, factor_df):
+    """动态调整A股权重上限"""
+    if not PARAMS.get("use_dynamic_a_share_cap", False):
+        return PARAMS["a_share_weight_cap"]
+    if factor_df is None or factor_df.empty:
+        return PARAMS["a_share_weight_cap"]
+    a_assets = [a for a in assets if a in A_SHARE_ETFS]
+    if not a_assets:
+        return PARAMS["a_share_weight_cap"]
+    dd = factor_df.loc[a_assets, "trend_dd"]
+    dd = dd.replace([np.inf, -np.inf], np.nan).dropna()
+    if dd.empty:
+        return PARAMS["a_share_weight_cap"]
+    dd_metric = float(np.nanpercentile(dd.values, 75))
+    threshold = PARAMS.get("a_share_dd_threshold", None)
+    low = PARAMS.get("a_share_weight_cap_low", PARAMS["a_share_weight_cap"])
+    high = PARAMS.get("a_share_weight_cap_high", PARAMS["a_share_weight_cap"])
+    if threshold is None:
+        return PARAMS["a_share_weight_cap"]
+    if dd_metric >= threshold:
+        return low
+    return high
+
+
+def _dynamic_industry_cap(assets, factor_df):
+    """动态调整行业权重上限"""
+    if not PARAMS.get("use_dynamic_industry_cap", False):
+        return PARAMS["industry_weight_cap"]
+    if factor_df is None or factor_df.empty:
+        return PARAMS["industry_weight_cap"]
+    i_assets = [a for a in assets if a in INDUSTRY_ETFS]
+    if not i_assets:
+        return PARAMS["industry_weight_cap"]
+    dd = factor_df.loc[i_assets, "trend_dd"]
+    dd = dd.replace([np.inf, -np.inf], np.nan).dropna()
+    if dd.empty:
+        return PARAMS["industry_weight_cap"]
+    dd_metric = float(np.nanpercentile(dd.values, 75))
+    threshold = PARAMS.get("industry_dd_threshold", None)
+    low = PARAMS.get("industry_weight_cap_low", PARAMS["industry_weight_cap"])
+    high = PARAMS.get("industry_weight_cap_high", PARAMS["industry_weight_cap"])
+    if threshold is None:
+        return PARAMS["industry_weight_cap"]
+    if dd_metric >= threshold:
+        return low
+    return high
+
+
+def _dynamic_max_weight(assets, factor_df):
+    """动态调整个股权重上限"""
+    if not PARAMS.get("use_dynamic_max_weight", False):
+        return PARAMS["max_weight"]
+    if factor_df is None or factor_df.empty:
+        return PARAMS["max_weight"]
+    assets = list(assets)
+    dd = factor_df.loc[assets, "trend_dd"]
+    dd = dd.replace([np.inf, -np.inf], np.nan).dropna()
+    if dd.empty:
+        return PARAMS["max_weight"]
+    dd_metric = float(np.nanpercentile(dd.values, 75))
+    threshold = PARAMS.get("max_weight_dd_threshold", None)
+    low = PARAMS.get("max_weight_low", PARAMS["max_weight"])
+    high = PARAMS.get("max_weight_high", PARAMS["max_weight"])
+    if threshold is None:
+        return PARAMS["max_weight"]
+    if dd_metric >= threshold:
+        return low
+    return high
+
 def _apply_volatility_scaling(target_weights, returns_df, target_volatility):
     """
     方案3：分层方法 - 趋势判断 + 波动率微调
@@ -1175,11 +1246,12 @@ def calculate_for_date(calc_date_str, verbose=True):
                 capped[active] += remaining / active.sum()
             return capped
 
-        # A股权重限制
+        # A股权重限制（使用动态上限）
         weights_before_cap = weights.copy()
-        if PARAMS["a_share_weight_cap"]:
+        a_share_cap = _dynamic_a_share_cap(actual_selected, df)
+        if a_share_cap:
             weights = _apply_group_weight_cap(
-                weights, actual_selected, A_SHARE_ETFS, PARAMS["a_share_weight_cap"]
+                weights, actual_selected, A_SHARE_ETFS, a_share_cap
             )
             if verbose:
                 print(f"\n【诊断日志：A股限制】")
@@ -1196,11 +1268,12 @@ def calculate_for_date(calc_date_str, verbose=True):
             weights[i] for i, a in enumerate(actual_selected) if a in A_SHARE_ETFS
         )
 
-        # 行业权重限制
+        # 行业权重限制（使用动态上限）
         weights_before_industry = weights.copy()
-        if PARAMS["industry_weight_cap"]:
+        industry_cap = _dynamic_industry_cap(actual_selected, df)
+        if industry_cap:
             weights = _apply_group_weight_cap(
-                weights, actual_selected, INDUSTRY_ETFS, PARAMS["industry_weight_cap"]
+                weights, actual_selected, INDUSTRY_ETFS, industry_cap
             )
             if verbose:
                 print(f"\n【诊断日志：行业限制】")
@@ -1217,9 +1290,9 @@ def calculate_for_date(calc_date_str, verbose=True):
             weights[i] for i, a in enumerate(actual_selected) if a in INDUSTRY_ETFS
         )
 
-        # 个股权重上限
+        # 个股权重上限（使用动态上限）
         weights_before_individual = weights.copy()
-        max_weight = PARAMS["max_weight"]
+        max_weight = _dynamic_max_weight(actual_selected, df)
         if max_weight:
             weights = _apply_weight_cap(weights, max_weight)
 
