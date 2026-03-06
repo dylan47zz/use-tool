@@ -109,8 +109,8 @@ PARAMS = {
     # v2: 可选，设置收缩强度的上下限（Ledoit-Wolf自动计算的结果会被限制在此范围内）
     "shrinkage_floor": 0.05,  # 最小收缩强度（0表示完全信任样本协方差）
     "shrinkage_cap": 0.3,  # 最大收缩强度（1表示完全使用目标矩阵）
-    # v2: 目标波动率（0表示不使用，保持满仓）
-    "target_volatility": 0.15,
+    # v2: 目标波动率（0表示不使用，保持满仓）- 与回测环境一致
+    "target_volatility": 0,
     "volume_ratio_threshold": 1.6,
     "volume_penalty_power": 0.8,
     "use_relative_crowding": True,
@@ -987,13 +987,8 @@ def calculate_for_date(calc_date_str, verbose=True):
             for etf, val in zip(actual_selected, raw):
                 print(f"  {etf}: {val:.8f}")
 
-        if PARAMS["epo_risk_aversion"] > 0:
-            raw = raw / PARAMS["epo_risk_aversion"]
-            if verbose:
-                print(f"\n风险厌恶调整 (λ={PARAMS['epo_risk_aversion']}):")
-                for etf, val in zip(actual_selected, raw):
-                    print(f"  {etf}: {val:.8f}")
-
+        # v2: 与回测环境一致，不再使用 epo_risk_aversion（已废弃）
+        # 直接返回未归一化的raw权重，让调用方统一归一化
         raw = np.maximum(0, raw)
         if verbose:
             print(f"\n仅做多约束后:")
@@ -1352,10 +1347,8 @@ def calculate_for_date(calc_date_str, verbose=True):
             )
             print("-" * 110)
 
-            # EPO原始权重
+            # EPO原始权重（与回测环境一致，不再使用 epo_risk_aversion）
             epo_raw = inv_cov.dot(signals)
-            if PARAMS["epo_risk_aversion"] > 0:
-                epo_raw = epo_raw / PARAMS["epo_risk_aversion"]
             epo_raw = np.maximum(0, epo_raw)
             epo_raw = (
                 epo_raw / np.sum(epo_raw)
