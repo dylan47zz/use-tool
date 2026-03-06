@@ -1179,6 +1179,10 @@ def calculate_for_date(calc_date_str, verbose=True):
         # 如需测试，取消下面这行的注释
         # penalties = [1.0] * len(penalties)
 
+        # 打印实际应用的惩罚
+        if verbose:
+            print(f"\n【实际惩罚因子】（禁用相对拥挤后）: {dict(zip(actual_selected, [f'{p:.4f}' for p in penalties]))}")
+        
         weights = weights * np.array(penalties)
         weights = weights / np.sum(weights) if np.sum(weights) > 0 else weights
 
