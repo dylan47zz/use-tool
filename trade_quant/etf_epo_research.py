@@ -88,8 +88,17 @@ PARAMS = {
     "use_dynamic_max_weight": True,
     "max_a_share_holdings": 1,
     "a_share_weight_cap": 0.5,
+    "a_share_weight_cap_high": 0.5,
+    "a_share_weight_cap_low": 0.35,
+    "a_share_dd_threshold": 0.05,
+    "use_dynamic_a_share_cap": True,
+    "min_holdings": 1,
+    "min_holdings_risk": 2,
+    "min_holdings_dd_threshold": 0.05,
+    "use_dynamic_min_holdings": True,
+    "avoid_industry": False,
     "max_industry_holdings": 1,
-    "industry_weight_cap": 0.35,
+    "industry_weight_cap": 0.35,\n    "industry_weight_cap_high": 0.35,\n    "industry_weight_cap_low": 0.25,\n    "industry_dd_threshold": 0.05,\n    "use_dynamic_industry_cap": True,
     "industry_penalty": 0.85,
     "trend_penalty": 0.6,
     "trend_window": 20,
@@ -811,24 +820,56 @@ def calculate_for_date(calc_date_str, verbose=True):
         if signal_series.empty:
             return {"success": False, "message": "无有效信号"}
 
-        # 候选选择（限制A股和行业数量）
+        # 候选选择（与回测环境一致）
+        min_holdings = PARAMS["min_holdings"]
+        if PARAMS.get("use_dynamic_min_holdings") and df is not None and not df.empty:
+            dd = df.loc[signal_series.index, "trend_dd"]
+            dd = dd.replace([np.inf, -np.inf], np.nan).dropna()
+            if not dd.empty:
+                dd_metric = float(np.nanpercentile(dd.values, 75))
+                if dd_metric >= PARAMS.get("min_holdings_dd_threshold", 0.05):
+                    min_holdings = PARAMS.get("min_holdings_risk", 2)
+        signal_series = signal_series.sort_values(ascending=False)
         selected = []
         a_count, i_count = 0, 0
         max_a = PARAMS["max_a_share_holdings"]
-        max_i = PARAMS["max_industry_holdings"]
+        max_i = PARAMS.get("max_industry_holdings", 1)
+        avoid_industry = PARAMS.get("avoid_industry", False)
 
         for etf in signal_series.index:
-            if etf in A_SHARE_ETFS and a_count >= max_a:
+            if avoid_industry and etf in INDUSTRY_ETFS:
                 continue
-            if etf in INDUSTRY_ETFS and i_count >= max_i:
-                continue
-            if etf in A_SHARE_ETFS:
-                a_count += 1
-            if etf in INDUSTRY_ETFS:
+            if max_i is not None and etf in INDUSTRY_ETFS:
+                if i_count >= max_i:
+                    continue
                 i_count += 1
+            if etf in A_SHARE_ETFS:
+                if a_count >= max_a:
+                    continue
+                a_count += 1
             selected.append(etf)
-            if len(selected) >= PARAMS["max_holdings"]:
+            if PARAMS.get("max_holdings") and len(selected) >= PARAMS["max_holdings"]:
                 break
+
+        # fallback: 如果持仓数少于最小要求，补充候选
+        if min_holdings and len(selected) < min_holdings:
+            fallback = df["signal"].sort_values(ascending=False)
+            for etf in fallback.index:
+                if etf in selected:
+                    continue
+                if avoid_industry and etf in INDUSTRY_ETFS:
+                    continue
+                if max_i is not None and etf in INDUSTRY_ETFS:
+                    if i_count >= max_i:
+                        continue
+                    i_count += 1
+                if etf in A_SHARE_ETFS and a_count >= max_a:
+                    continue
+                if etf in A_SHARE_ETFS:
+                    a_count += 1
+                selected.append(etf)
+                if len(selected) >= min_holdings:
+                    break
 
         if verbose:
             print(f"\n候选池: {len(selected)}只ETF")
@@ -1231,89 +1272,7 @@ def calculate_for_date(calc_date_str, verbose=True):
         if total > 0:
             target_weights = {k: v / total for k, v in target_weights.items()}
 
-        # ============ 关键修复：添加类似回测环境 _adjust_weights_for_trading 的逻辑 ============
-        # 模拟回测环境的 _adjust_weights_for_trading 逻辑
-        if verbose:
-            print(f"\n【诊断日志：_adjust_weights_for_trading 模拟】")
-
-        # 重新归一化（与回测环境一致）
-        assets = list(target_weights.keys())
-        weights = np.array([target_weights[a] for a in assets])
-        weights = _normalize(weights)
-
-        if verbose:
-            print(
-                f"  初始权重: {dict((k, f'{v * 100:.2f}%') for k, v in zip(assets, weights))}"
-            )
-
-        # 回测环境中的 _adjust_weights_for_trading 会过滤掉太小的 ETF
-        # 假设石油因为权重太小被过滤
-        if verbose:
-            print(f"\n  【关键假设】回测环境中石油可能被过滤")
-            print(f"    如果石油(16.32%)被过滤，重新归一化后:")
-            filtered_idx = [i for i, a in enumerate(assets) if a == "561360.XSHG"]
-            if filtered_idx:
-                remaining_weights = np.delete(weights, filtered_idx)
-                remaining_assets = [a for a in assets if a != "561360.XSHG"]
-                remaining_weights = _normalize(remaining_weights)
-                # 诊断日志：安全处理任意数量的ETF
-                if len(remaining_weights) >= 2:
-                    print(f"      创业板: {remaining_weights[0] * 100:.2f}%")
-                    print(f"      黄金: {remaining_weights[1] * 100:.2f}%")
-                elif len(remaining_weights) == 1:
-                    print(f"      {remaining_assets[0]}: {remaining_weights[0] * 100:.2f}% (仅1个ETF)")
-                else:
-                    print(f"      (无剩余ETF)")
-
-        # 应用 A股权重限制
-        a_share_cap = PARAMS["a_share_weight_cap"]
-        if a_share_cap:
-            weights = _apply_group_weight_cap(
-                weights, assets, A_SHARE_ETFS, a_share_cap
-            )
-            if verbose:
-                print(
-                    f"  A股限制后: {dict((k, f'{v * 100:.2f}%') for k, v in zip(assets, weights))}"
-                )
-
-        # 应用行业权重限制
-        industry_cap = PARAMS["industry_weight_cap"]
-        if industry_cap:
-            weights = _apply_group_weight_cap(
-                weights, assets, INDUSTRY_ETFS, industry_cap
-            )
-            if verbose:
-                print(
-                    f"  行业限制后: {dict((k, f'{v * 100:.2f}%') for k, v in zip(assets, weights))}"
-                )
-
-        # 应用个股权重上限
-        max_weight = PARAMS["max_weight"]
-        if max_weight:
-            weights_before_cap = weights.copy()
-            weights = _apply_weight_cap(weights, max_weight)
-            if verbose:
-                print(
-                    f"  上限({max_weight * 100:.0f}%)前: {dict((k, f'{v * 100:.2f}%') for k, v in zip(assets, weights_before_cap))}"
-                )
-                print(
-                    f"  上限({max_weight * 100:.0f}%)后: {dict((k, f'{v * 100:.2f}%') for k, v in zip(assets, weights))}"
-                )
-
-        # 重新组装 target_weights
-        target_weights = dict(zip(assets, weights))
-
-        if verbose:
-            print(f"\n【诊断日志：_adjust_weights_for_trading 最终结果】")
-            print(
-                f"  最终权重: {dict((k, f'{v * 100:.2f}%') for k, v in target_weights.items())}"
-            )
-            print(f"  回测环境结果: 创业板 50.0%, 黄金 41.7%, 石油 8.3%")
-            print(f"  差异分析:")
-            print(f"    - 如果石油被过滤且重新归一化，创业板应该是 41.3%，不是 50%")
-            print(f"    - 这说明回测环境中还有其他逻辑，导致创业板恰好达到 50% 上限")
-
-        # 计算分类统计（无论verbose如何都计算）
+        # 计算分类统计
         category_weights = {}
         for etf, w in target_weights.items():
             cat = "其他"
